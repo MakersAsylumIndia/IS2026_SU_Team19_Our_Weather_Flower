@@ -1,0 +1,19 @@
+#define AO_PIN 34
+#define DO_PIN 25   // optional
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(DO_PIN, INPUT);
+}
+
+void loop() {
+  int gasValue = analogRead(AO_PIN);   // 0–4095 on ESP32
+  int threshold = digitalRead(DO_PIN);
+
+  Serial.print("Gas level: ");
+  Serial.print(gasValue);
+  Serial.print("   Digital: ");
+  Serial.println(threshold == HIGH ? "clean" : "GAS DETECTED");
+
+  delay(500);
+}
