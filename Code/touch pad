@@ -1,0 +1,18 @@
+#define TOUCH_PIN 4
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TOUCH_PIN, INPUT);
+}
+
+void loop() {
+  int touched = digitalRead(TOUCH_PIN);
+
+  if (touched == HIGH) {
+    Serial.println("TOUCHED");
+  } else {
+    Serial.println("-- not touched --");
+  }
+
+  delay(200);
+}
