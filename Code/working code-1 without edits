@@ -1,0 +1,194 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include "DHT.h"
+#include <Adafruit_NeoPixel.h>
+
+// ESP32 Pins for Display
+#define TFT_CS     5   
+#define TFT_DC    21   
+#define TFT_RST    4
+#define TFT_BL    16   
+
+// ESP32 Pins for Sensors
+#define TOUCH_PIN 22   
+#define TRIG_PIN  25   
+#define ECHO_PIN  14   // Updated: Echo moved to 14 to free up 13
+#define MQ135_PIN 34
+#define DHTPIN    27
+#define DHTTYPE   DHT22
+
+// ESP32 Pin for Relay Module
+#define RELAY_PIN 26   
+
+// ESP32 Pin and LED Count for Ring LED (NeoPixel)
+#define LED_RING_PIN 13  // Integrated on D13
+#define NUMPIXELS    16  // Change this to match the number of LEDs on your ring
+
+// Initialize Hardware Objects
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+DHT dht(DHTPIN, DHTTYPE);
+Adafruit_NeoPixel ring(NUMPIXELS, LED_RING_PIN, NEO_GRB + NEO_KHZ800);
+
+uint16_t colors[] = {ST77XX_BLACK, ST77XX_BLUE, ST77XX_RED, ST77XX_MAGENTA, ST77XX_GREEN};
+int colorIndex = 0;
+const int totalColors = 5;
+
+bool lastTouchState = LOW;
+unsigned long lastSensorUpdate = 0;
+const long interval = 500; 
+
+const float TEMP_THRESHOLD = 30.0; 
+
+void drawStaticScreen(uint16_t bgColor) {
+  tft.fillScreen(bgColor);
+  tft.drawRect(0, 0, 320, 240, ST77XX_WHITE);
+
+  tft.setTextColor(ST77XX_ORANGE, bgColor);
+  tft.setTextSize(2);
+  tft.setCursor(45, 12);
+  tft.print("DASHBOARD MONITOR");
+  tft.drawLine(0, 35, 320, 35, ST77XX_YELLOW);
+
+  tft.drawFastVLine(160, 35, 160, ST77XX_WHITE); 
+  tft.drawFastHLine(0, 115, 320, ST77XX_WHITE);  
+  tft.drawFastHLine(0, 195, 320, ST77XX_YELLOW); 
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, bgColor);
+
+  tft.setCursor(15, 45);   tft.print("1. ULTRASONIC DISTANCE");
+  tft.setCursor(175, 45);  tft.print("2. AIR QUALITY (RAW)");
+  tft.setCursor(15, 125);  tft.print("3. TEMPERATURE");
+  tft.setCursor(175, 125); tft.print("4. HUMIDITY");
+
+  tft.setCursor(15, 205);
+  tft.setTextSize(2);
+  tft.print("RELAY STATE: ");
+}
+
+long getDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  return (duration * 0.0343 / 2);
+}
+
+// Helper function to change entire ring color smoothly
+void setRingColor(uint8_t r, uint8_t g, uint8_t b) {
+  for(int i=0; i<NUMPIXELS; i++) {
+    ring.setPixelColor(i, ring.Color(r, g, b));
+  }
+  ring.show();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TOUCH_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); 
+
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+
+  tft.init(240, 320);
+  tft.setRotation(1); 
+  dht.begin();
+
+  // Initialize LED Ring
+  ring.begin();
+  ring.setBrightness(50); // Set brightness level (0-255)
+  setRingColor(0, 255, 0); // Start with green light
+
+  drawStaticScreen(colors[colorIndex]);
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  bool currentTouchState = digitalRead(TOUCH_PIN);
+
+  if (currentTouchState == HIGH && lastTouchState == LOW) {
+    colorIndex = (colorIndex + 1) % totalColors;
+    drawStaticScreen(colors[colorIndex]);
+    delay(50); 
+  }
+  lastTouchState = currentTouchState;
+
+  if (currentMillis - lastSensorUpdate >= interval) {
+    lastSensorUpdate = currentMillis;
+    
+    long distance = getDistanceCM();
+    int gasRawValue = analogRead(MQ135_PIN);
+    float tempC = dht.readTemperature();
+    float humid = dht.readHumidity();
+
+    // --- Q1: ULTRASONIC ---
+    tft.setCursor(15, 65);
+    tft.setTextSize(3);
+    if (distance <= 0 || distance > 400) {
+      tft.setTextColor(ST77XX_RED, colors[colorIndex]);
+      tft.print("ERR  "); 
+    } else {
+      tft.setTextColor(ST77XX_GREEN, colors[colorIndex]);
+      tft.print(distance);
+      tft.setTextSize(1); tft.print(" cm   ");
+    }
+
+    // --- Q2: MQ-135 AIR ---
+    tft.setCursor(175, 65);
+    tft.setTextSize(3);
+    if (gasRawValue < 1200)       tft.setTextColor(ST77XX_GREEN, colors[colorIndex]);
+    else if (gasRawValue < 2500)  tft.setTextColor(ST77XX_YELLOW, colors[colorIndex]);
+    else                          tft.setTextColor(ST77XX_RED, colors[colorIndex]);
+    tft.print(gasRawValue);
+    tft.setTextSize(1); tft.print(" adc ");
+
+    // --- Q3: DHT22 TEMPERATURE ---
+    tft.setCursor(15, 145);
+    tft.setTextSize(3);
+    if (isnan(tempC)) {
+      tft.setTextColor(ST77XX_RED, colors[colorIndex]);
+      tft.print("ERR  ");
+    } else {
+      tft.setTextColor(ST77XX_CYAN, colors[colorIndex]);
+      tft.print(tempC, 1); 
+      tft.setTextSize(2); tft.print("C  ");
+    }
+
+    // --- Q4: DHT22 HUMIDITY ---
+    tft.setCursor(175, 145);
+    tft.setTextSize(3);
+    if (isnan(humid)) {
+      tft.setTextColor(ST77XX_RED, colors[colorIndex]);
+      tft.print("ERR  ");
+    } else {
+      tft.setTextColor(ST77XX_MAGENTA, colors[colorIndex]);
+      tft.print(humid, 1);
+      tft.setTextSize(2); tft.print("%  ");
+    }
+
+    // --- AUTOMATIC RELAY & LED RING CONTROL LOGIC ---
+    tft.setCursor(160, 205);
+    tft.setTextSize(2);
+
+    if (!isnan(tempC) && tempC > TEMP_THRESHOLD) {
+      digitalWrite(RELAY_PIN, HIGH); 
+      setRingColor(255, 0, 0); // Turn LED Ring RED
+      tft.setTextColor(ST77XX_RED, colors[colorIndex]);
+      tft.print("ON (HOT) ");
+    } else {
+      digitalWrite(RELAY_PIN, LOW);  
+      setRingColor(0, 255, 0); // Turn LED Ring GREEN
+      tft.setTextColor(ST77XX_GREEN, colors[colorIndex]);
+      tft.print("OFF      ");
+    }
+  }
+}
