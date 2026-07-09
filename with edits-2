@@ -1,0 +1,228 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include "DHT.h"
+#include <Adafruit_NeoPixel.h>
+
+// ESP32 Pins for Display
+#define TFT_CS     5   
+#define TFT_DC    21   
+#define TFT_RST    4
+#define TFT_BL    16   
+
+// ESP32 Pins for Sensors
+#define TOUCH_PIN 22   
+#define TRIG_PIN  25   
+#define ECHO_PIN  14   
+#define MQ135_PIN 34
+#define DHTPIN    27
+#define DHTTYPE   DHT22
+
+// ESP32 Pin for Relay Module
+#define RELAY_PIN 26   
+
+// ESP32 Pin and LED Count for Ring LED (NeoPixel)
+#define LED_RING_PIN 13  
+#define NUMPIXELS    16  
+
+// Initialize Hardware Objects
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+DHT dht(DHTPIN, DHTTYPE);
+Adafruit_NeoPixel ring(NUMPIXELS, LED_RING_PIN, NEO_GRB + NEO_KHZ800);
+
+#define BG_COLOR       ST77XX_BLACK
+
+unsigned long lastSensorUpdate = 0;
+const long interval = 500; 
+
+// Animation Variables
+unsigned long lastAnimUpdate = 0;
+const long animInterval = 30; // Smooth frame updates
+float bloomState = 0.0;       // 0.0 = Closed Bud, 1.0 = Fully Bloomed
+
+// Center coordinates for the flower placement
+const int flowerX = 160;
+const int flowerY = 115;
+
+// Threshold Settings
+const float TEMP_THRESHOLD = 30.0; 
+const float HUMID_THRESHOLD = 50.0; 
+
+void drawStaticScreen() {
+  tft.fillScreen(BG_COLOR);
+  tft.drawRect(0, 0, 320, 240, ST77XX_WHITE);
+
+  tft.setTextColor(ST77XX_ORANGE, BG_COLOR);
+  tft.setTextSize(2);
+  tft.setCursor(65, 12);
+  tft.print("INTERACTIVE TFT");
+  tft.drawLine(0, 35, 320, 35, ST77XX_YELLOW);
+
+  tft.drawFastHLine(0, 195, 320, ST77XX_YELLOW); 
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, BG_COLOR);
+
+  // Corner labels
+  tft.setCursor(15, 45);   tft.print("DIST:");
+  tft.setCursor(220, 45);  tft.print("GAS AQI:");
+  tft.setCursor(15, 175);  tft.print("TEMP:");
+  tft.setCursor(220, 175); tft.print("HUMIDITY:");
+
+  tft.setCursor(15, 208);
+  tft.setTextSize(2);
+  tft.print("RELAY STATE: ");
+}
+
+long getDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  return (duration * 0.0343 / 2);
+}
+
+void setRingColor(uint8_t r, uint8_t g, uint8_t b) {
+  for(int i=0; i<NUMPIXELS; i++) {
+    ring.setPixelColor(i, ring.Color(r, g, b));
+  }
+  ring.show();
+}
+
+// Logic modified to grow/shrink based on active touch state
+void updateFlowerAnimation(bool isTouched) {
+  // 1. Erase the previous frame area to clear trails
+  tft.fillCircle(flowerX, flowerY, 32, BG_COLOR);
+
+  // 2. Control state shifts based on touch interaction
+  if (isTouched) {
+    if (bloomState < 1.0) bloomState += 0.04; // Grow while touched
+    if (bloomState > 1.0) bloomState = 1.0;
+  } else {
+    if (bloomState > 0.0) bloomState -= 0.04; // Shrink when released
+    if (bloomState < 0.0) bloomState = 0.0;
+  }
+
+  // Only draw if the flower is partially or fully visible
+  if (bloomState > 0.01) {
+    int totalPetals = 6;
+    int maxPetalSize = 24;
+    int currentPetalSize = maxPetalSize * bloomState;
+
+    // 3. Draw math petals
+    for (int i = 0; i < totalPetals; i++) {
+      float angle = (i * 2.0 * 3.14159) / totalPetals;
+      int petalTipX = flowerX + (int)(cos(angle) * currentPetalSize);
+      int petalTipY = flowerY + (int)(sin(angle) * currentPetalSize);
+      
+      tft.drawCircle(petalTipX, petalTipY, 8 * bloomState, ST77XX_MAGENTA);
+      tft.fillCircle(petalTipX, petalTipY, 6 * bloomState, 0xF812); // Rosy Red fill
+    }
+
+    // 4. Draw center pistil core
+    tft.fillCircle(flowerX, flowerY, 7 * bloomState, ST77XX_YELLOW);
+    tft.drawCircle(flowerX, flowerY, 7 * bloomState, ST77XX_ORANGE);
+  } else {
+    // Show a tiny static green bud point when completely closed
+    tft.fillCircle(flowerX, flowerY, 3, ST77XX_GREEN);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TOUCH_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); 
+
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+
+  tft.init(240, 320);
+  tft.setRotation(1); 
+  dht.begin();
+
+  ring.begin();
+  ring.setBrightness(50); 
+  setRingColor(0, 0, 255); 
+
+  drawStaticScreen();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  bool currentTouchState = (digitalRead(TOUCH_PIN) == HIGH);
+
+  // --- ANIMATION TRACKER ENGINE ---
+  if (currentMillis - lastAnimUpdate >= animInterval) {
+    lastAnimUpdate = currentMillis;
+    updateFlowerAnimation(currentTouchState); // Sends active touch reading directly to animator
+  }
+
+  // --- SENSOR ACQUISITION CLOCK ENGINE ---
+  if (currentMillis - lastSensorUpdate >= interval) {
+    lastSensorUpdate = currentMillis;
+    
+    long distance = getDistanceCM();
+    int gasRawValue = analogRead(MQ135_PIN);
+    float tempC = dht.readTemperature();
+    float humid = dht.readHumidity();
+
+    // Q1: Ultrasonic
+    tft.setCursor(15, 60); tft.setTextSize(2);
+    if (distance <= 0 || distance > 400) {
+      tft.setTextColor(ST77XX_RED, BG_COLOR); tft.print("ERR   "); 
+    } else {
+      tft.setTextColor(ST77XX_GREEN, BG_COLOR); tft.print(distance); tft.print("cm ");
+    }
+
+    // Q2: MQ-135 Gas
+    tft.setCursor(220, 60); tft.setTextSize(2);
+    tft.setTextColor(gasRawValue < 1500 ? ST77XX_GREEN : ST77XX_RED, BG_COLOR);
+    tft.print(gasRawValue); tft.print("  ");
+
+    // Q3: Temperature
+    tft.setCursor(15, 140); tft.setTextSize(2);
+    if (isnan(tempC)) {
+      tft.setTextColor(ST77XX_RED, BG_COLOR); tft.print("ERR   ");
+    } else {
+      tft.setTextColor(ST77XX_CYAN, BG_COLOR); tft.print(tempC, 0); tft.print("C ");
+    }
+
+    // Q4: Humidity
+    tft.setCursor(220, 140); tft.setTextSize(2);
+    if (isnan(humid)) {
+      tft.setTextColor(ST77XX_RED, BG_COLOR); tft.print("ERR   ");
+    } else {
+      tft.setTextColor(ST77XX_MAGENTA, BG_COLOR); tft.print(humid, 0); tft.print("% ");
+    }
+
+    // --- AUTOMATIC RELAY & LED RING CONTROL LOGIC ---
+    tft.setCursor(160, 205); tft.setTextSize(2);
+
+    bool isHot = (!isnan(tempC) && tempC > TEMP_THRESHOLD);
+    bool isDry = (!isnan(humid) && humid < HUMID_THRESHOLD);
+
+    if (isHot) {
+      setRingColor(255, 0, 0); 
+    } else {
+      setRingColor(0, 0, 255); 
+    }
+
+    if (isHot || isDry) {
+      digitalWrite(RELAY_PIN, HIGH); 
+      tft.setTextColor(ST77XX_RED, BG_COLOR);
+      if (isHot && isDry)       tft.print("ON (H&D)  ");
+      else if (isHot)           tft.print("ON (HOT)  ");
+      else                      tft.print("ON (DRY)  ");
+    } else {
+      digitalWrite(RELAY_PIN, LOW);  
+      tft.setTextColor(ST77XX_GREEN, BG_COLOR);
+      tft.print("OFF       ");
+    }
+  }
+}
